@@ -34,7 +34,7 @@ func NewBot(token string, repo repository.Repository, llmClient llm.Client) *Bot
 	// Настройки бота
 	pref := tele.Settings{
 		Token:  token,
-		Poller: &tele.LongPoller{Timeout: 10},
+		Poller: &tele.LongPoller{Timeout: BotPollerTimeout},
 	}
 
 	bot, err := tele.NewBot(pref)
@@ -65,25 +65,25 @@ func (b *Bot) Start() error {
 // registerHandlers регистрирует все обработчики команд
 func (b *Bot) registerHandlers() {
 	// Основные команды
-	b.bot.Handle("/start", b.handleStart)
-	b.bot.Handle("/help", b.handleHelp)
-	b.bot.Handle("/goals", b.handleGoals)
-	b.bot.Handle("/newgoal", b.handleNewGoal)
-	b.bot.Handle("/status", b.handleStatus)
-	b.bot.Handle("/step", b.handleStep)
-	b.bot.Handle("/done", b.handleDone)
-	b.bot.Handle("/next", b.handleNext)
-	b.bot.Handle("/rephrase", b.handleRephrase)
-	b.bot.Handle("/simpler", b.handleSimpler)
-	b.bot.Handle("/switch", b.handleSwitch)
-	b.bot.Handle("/complete", b.handleComplete)
-	b.bot.Handle("/context", b.handleContext)
+	b.bot.Handle(CmdStart, b.handleStart)
+	b.bot.Handle(CmdHelp, b.handleHelp)
+	b.bot.Handle(CmdGoals, b.handleGoals)
+	b.bot.Handle(CmdNewGoal, b.handleNewGoal)
+	b.bot.Handle(CmdStatus, b.handleStatus)
+	b.bot.Handle(CmdStep, b.handleStep)
+	b.bot.Handle(CmdDone, b.handleDone)
+	b.bot.Handle(CmdNext, b.handleNext)
+	b.bot.Handle(CmdRephrase, b.handleRephrase)
+	b.bot.Handle(CmdSimpler, b.handleSimpler)
+	b.bot.Handle(CmdSwitch, b.handleSwitch)
+	b.bot.Handle(CmdComplete, b.handleComplete)
+	b.bot.Handle(CmdContext, b.handleContext)
 
 	// Обработчик кнопок
-	b.bot.Handle(&tele.Btn{Text: "✅ Выполнил"}, b.handleDone)
-	b.bot.Handle(&tele.Btn{Text: "🔄 Переформулировать"}, b.handleRephrase)
-	b.bot.Handle(&tele.Btn{Text: "🔽 Упростить"}, b.handleSimpler)
-	b.bot.Handle(&tele.Btn{Text: "🎉 Завершить цель"}, b.handleComplete)
+	b.bot.Handle(&tele.Btn{Text: BtnTextDone}, b.handleDone)
+	b.bot.Handle(&tele.Btn{Text: BtnTextRephrase}, b.handleRephrase)
+	b.bot.Handle(&tele.Btn{Text: BtnTextSimpler}, b.handleSimpler)
+	b.bot.Handle(&tele.Btn{Text: BtnTextComplete}, b.handleComplete)
 
 	// Обработка текстовых сообщений
 	b.bot.Handle(tele.OnText, b.handleText)
@@ -101,23 +101,23 @@ func (b *Bot) handleStart(c tele.Context) error {
 		// Создаем нового пользователя
 		user := models.NewUser(userID, username, firstName)
 		if err := b.repo.CreateUser(user); err != nil {
-			return c.Send("❌ Ошибка при создании пользователя")
+			return c.Send(MsgErrorCreateUser)
 		}
 	}
 
 	// Создаем или обновляем состояние пользователя
 	b.states[c.Sender().ID] = &UserState{
 		UserID:   c.Sender().ID,
-		State:    "idle",
+		State:    StateIdle,
 		TempData: make(map[string]string),
 	}
 
 	// Приветственное сообщение
-	message := fmt.Sprintf("🎯 Привет, %s!\n\nЯ помогу тебе достичь целей через простые шаги.\n\nЧто хочешь сделать?", firstName)
+	message := fmt.Sprintf(MsgWelcomeTemplate, firstName)
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-	btnGoals := menu.Text("📋 Мои цели")
-	btnNewGoal := menu.Text("➕ Новая цель")
+	btnGoals := menu.Text(BtnTextGoals)
+	btnNewGoal := menu.Text(BtnTextNewGoal)
 
 	menu.Reply(
 		menu.Row(btnGoals),
@@ -172,11 +172,11 @@ func (b *Bot) handleGoals(c tele.Context) error {
 
 	goals, err := b.repo.GetUserGoals(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении целей")
+		return c.Send(MsgErrorSteps)
 	}
 
 	if len(goals) == 0 {
-		return c.Send("📝 У тебя пока нет целей.\n\nСоздай первую цель командой /newgoal")
+		return c.Send(MsgNoGoals)
 	}
 
 	var message strings.Builder
@@ -184,15 +184,15 @@ func (b *Bot) handleGoals(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	for i, goal := range goals {
-		status := "⏳"
-		if goal.Status == "completed" {
-			status = "✅"
+		status := StatusIconInactive
+		if goal.Status == GoalStatusCompleted {
+			status = StatusIconCompleted
 		} else if goal.ID == user.ActiveGoalID {
-			status = "🎯"
+			status = StatusIconActive
 		}
 		message.WriteString(fmt.Sprintf("%s **%d. %s**\n", status, i+1, goal.Title))
 		if goal.Description != "" {
@@ -208,10 +208,10 @@ func (b *Bot) handleGoals(c tele.Context) error {
 func (b *Bot) handleNewGoal(c tele.Context) error {
 	// Устанавливаем состояние "создание цели"
 	state := b.getOrCreateState(c.Sender().ID)
-	state.State = "waiting_goal_description"
+	state.State = StateWaitingGoalDescription
 	state.TempData = make(map[string]string)
 
-	return c.Send("🎯 Отлично! Давай создадим новую цель.\n\nОпиши свою цель подробно - что именно ты хочешь достичь? Я сам придумаю подходящее название.")
+	return c.Send(MsgNewGoalPrompt)
 }
 
 // handleStatus обрабатывает команду /status
@@ -220,26 +220,26 @@ func (b *Bot) handleStatus(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели.\n\nВыбери цель из списка командой /goals или создай новую командой /newgoal")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении активной цели")
+		return c.Send(MsgErrorActiveGoal)
 	}
 
 	// Проверяем статус цели
-	if goal.Status == "completed" {
-		return c.Send("✅ Эта цель уже завершена!\n\nСоздай новую цель командой /newgoal или выбери другую из списка /goals")
+	if goal.Status == GoalStatusCompleted {
+		return c.Send(MsgGoalAlreadyCompleted)
 	}
 
 	steps, err := b.repo.GetGoalSteps(goal.ID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении шагов")
+		return c.Send(MsgErrorSteps)
 	}
 
 	completedCount := 0
@@ -249,12 +249,12 @@ func (b *Bot) handleStatus(c tele.Context) error {
 		}
 	}
 
-	message := fmt.Sprintf("🎯 **Активная цель:** %s\n\n", goal.Title)
+	message := fmt.Sprintf(MsgActiveGoalTemplate, goal.Title)
 	if goal.Description != "" {
-		message += fmt.Sprintf("📝 %s\n\n", goal.Description)
+		message += fmt.Sprintf(MsgGoalDescriptionTemplate, goal.Description)
 	}
-	message += fmt.Sprintf("📊 **Прогресс:** %d/%d шагов выполнено\n\n", completedCount, len(steps))
-	message += "Используй /step чтобы увидеть текущий шаг"
+	message += fmt.Sprintf(MsgProgressTemplate, completedCount, len(steps))
+	message += MsgUseStepCommand
 
 	return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 }
@@ -265,34 +265,34 @@ func (b *Bot) handleStep(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели.\n\nВыбери цель из списка командой /goals")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении активной цели")
+		return c.Send(MsgErrorActiveGoal)
 	}
 
 	// Проверяем статус цели
-	if goal.Status == "completed" {
-		return c.Send("✅ Эта цель уже завершена!\n\nСоздай новую цель командой /newgoal или выбери другую из списка /goals")
+	if goal.Status == GoalStatusCompleted {
+		return c.Send(MsgGoalAlreadyCompleted)
 	}
 
 	currentStep, err := b.repo.GetCurrentStep(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("✅ Поздравляю! Ты выполнил все шаги для этой цели.\n\nИспользуй /next чтобы получить следующий шаг")
+		return c.Send(MsgAllStepsCompleted)
 	}
 
-	message := fmt.Sprintf("📝 **Текущий шаг:**\n\n%s", currentStep.Text)
+	message := fmt.Sprintf(MsgCurrentStepTemplate, currentStep.Text)
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-	btnDone := menu.Text("✅ Выполнил")
-	btnRephrase := menu.Text("🔄 Переформулировать")
-	btnSimpler := menu.Text("🔽 Упростить")
+	btnDone := menu.Text(BtnTextDone)
+	btnRephrase := menu.Text(BtnTextRephrase)
+	btnSimpler := menu.Text(BtnTextSimpler)
 
 	menu.Reply(
 		menu.Row(btnDone),
@@ -308,35 +308,35 @@ func (b *Bot) handleDone(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении цели")
+		return c.Send(MsgErrorGoal)
 	}
 
 	// Проверяем статус цели
-	if goal.Status == "completed" {
-		return c.Send("✅ Эта цель уже завершена!\n\nСоздай новую цель командой /newgoal или выбери другую из списка /goals")
+	if goal.Status == GoalStatusCompleted {
+		return c.Send(MsgGoalAlreadyCompleted)
 	}
 
 	currentStep, err := b.repo.GetCurrentStep(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("✅ Поздравляю! Ты выполнил все шаги для этой цели")
+		return c.Send(MsgAllStepsCompleted)
 	}
 
 	// Отмечаем шаг как выполненный
 	currentStep.Complete()
 	if err := b.repo.UpdateStep(currentStep); err != nil {
-		return c.Send("❌ Ошибка при обновлении шага")
+		return c.Send(MsgErrorUpdateStep)
 	}
 
-	return c.Send("✅ Отлично! Шаг выполнен.\n\nИспользуй /next чтобы получить следующий шаг")
+	return c.Send(MsgStepCompleted)
 }
 
 // handleNext обрабатывает команду /next
@@ -345,27 +345,27 @@ func (b *Bot) handleNext(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении цели")
+		return c.Send(MsgErrorGoal)
 	}
 
 	// Проверяем статус цели
-	if goal.Status == "completed" {
-		return c.Send("✅ Эта цель уже завершена!\n\nСоздай новую цель командой /newgoal или выбери другую из списка /goals")
+	if goal.Status == GoalStatusCompleted {
+		return c.Send(MsgGoalAlreadyCompleted)
 	}
 
 	// Получаем все шаги для цели
 	allSteps, err := b.repo.GetGoalSteps(goal.ID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении шагов")
+		return c.Send(MsgErrorSteps)
 	}
 
 	// Проверяем, есть ли невыполненные шаги
@@ -385,7 +385,7 @@ func (b *Bot) handleNext(c tele.Context) error {
 
 	// Если есть невыполненный шаг, предлагаем его выполнить
 	if currentStep != nil {
-		message := fmt.Sprintf("⏳ У тебя есть невыполненный шаг:\n\n**%s**\n\nСначала выполни этот шаг командой /done, а потом получи следующий.", currentStep.Text)
+		message := fmt.Sprintf(MsgUnfinishedStepTemplate, currentStep.Text)
 		return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 	}
 
@@ -400,17 +400,17 @@ func (b *Bot) handleNext(c tele.Context) error {
 		contextResponse, err := b.llmClient.GatherContext(goal)
 		if err != nil {
 			log.Printf("❌ Ошибка при сборе контекста: %v", err)
-			return c.Send("❌ Ошибка при сборе контекста")
+			return c.Send(MsgErrorGatherContext)
 		}
 
-		if contextResponse.Status == "need_context" {
+		if contextResponse.Status == LLMStatusNeedContext {
 			// Нужен дополнительный контекст
 			state := b.getOrCreateState(c.Sender().ID)
-			state.State = "gathering_context"
+			state.State = StateGatheringContext
 			state.TempData["goal_id"] = goal.ID
 			state.TempData["context_question"] = contextResponse.Question
 
-			message := fmt.Sprintf("🔍 Для более точной помощи мне нужно узнать немного больше о тебе:\n\n**%s**\n\nОтветь на этот вопрос, и я смогу предложить подходящие шаги.", contextResponse.Question)
+			message := fmt.Sprintf(MsgContextQuestionTemplate, contextResponse.Question)
 			return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 		}
 	}
@@ -423,42 +423,41 @@ func (b *Bot) handleNext(c tele.Context) error {
 
 	log.Printf("🔍 Получен ответ от LLM: статус=%s, шаг=%s", response.Status, response.Step)
 
-	if response.Status == "need_clarification" {
-		return c.Send(fmt.Sprintf("❓ %s", response.Question))
+	if response.Status == LLMStatusNeedClarification {
+		return c.Send(fmt.Sprintf(MsgClarificationTemplate, response.Question))
 	}
 
 	// Обрабатываем завершение цели
-	if response.Status == "goal_completed" {
+	if response.Status == LLMStatusGoalCompleted {
 		// Получаем пользователя для завершения цели
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		user, err := b.repo.GetUser(userID)
 		if err != nil {
-			return c.Send("❌ Ошибка при получении пользователя")
+			return c.Send(MsgErrorUserData)
 		}
 
 		if err := b.completeGoal(goal, user, response.CompletionReason); err != nil {
-			return c.Send("❌ Ошибка при завершении цели")
+			return c.Send(MsgErrorUpdateGoal)
 		}
-		message := fmt.Sprintf("🎉 **Поздравляю! Цель достигнута!**\n\n**%s**\n\n%s\n\nСоздай новую цель командой /newgoal",
-			goal.Title, response.CompletionReason)
+		message := fmt.Sprintf(MsgGoalCompletedTemplate, goal.Title, response.CompletionReason)
 		return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 	}
 
 	// Обрабатываем близость к завершению
-	if response.Status == "near_completion" {
+	if response.Status == LLMStatusNearCompletion {
 		// Создаем новый шаг
 		newStep := models.NewStep(goal.ID, response.Step)
 		if err := b.repo.CreateStep(newStep); err != nil {
-			return c.Send("❌ Ошибка при создании шага")
+			return c.Send(MsgErrorCreateStep)
 		}
 
-		message := fmt.Sprintf("🎯 **Почти готово! Осталось совсем немного:**\n\n%s\n\n💡 После этого шага цель может быть достигнута!", newStep.Text)
+		message := fmt.Sprintf(MsgNearCompletionTemplate, newStep.Text)
 
 		menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-		btnDone := menu.Text("✅ Выполнил")
-		btnRephrase := menu.Text("🔄 Переформулировать")
-		btnSimpler := menu.Text("🔽 Упростить")
-		btnComplete := menu.Text("🎉 Завершить цель")
+		btnDone := menu.Text(BtnTextDone)
+		btnRephrase := menu.Text(BtnTextRephrase)
+		btnSimpler := menu.Text(BtnTextSimpler)
+		btnComplete := menu.Text(BtnTextComplete)
 
 		menu.Reply(
 			menu.Row(btnDone),
@@ -470,19 +469,19 @@ func (b *Bot) handleNext(c tele.Context) error {
 	}
 
 	// Обычный шаг
-	if response.Status == "ok" {
+	if response.Status == LLMStatusOK {
 		// Создаем новый шаг
 		newStep := models.NewStep(goal.ID, response.Step)
 		if err := b.repo.CreateStep(newStep); err != nil {
-			return c.Send("❌ Ошибка при создании шага")
+			return c.Send(MsgErrorCreateStep)
 		}
 
-		message := fmt.Sprintf("📝 **Новый шаг:**\n\n%s", newStep.Text)
+		message := fmt.Sprintf(MsgNewStepTemplate, newStep.Text)
 
 		menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-		btnDone := menu.Text("✅ Выполнил")
-		btnRephrase := menu.Text("🔄 Переформулировать")
-		btnSimpler := menu.Text("🔽 Упростить")
+		btnDone := menu.Text(BtnTextDone)
+		btnRephrase := menu.Text(BtnTextRephrase)
+		btnSimpler := menu.Text(BtnTextSimpler)
 
 		menu.Reply(
 			menu.Row(btnDone),
@@ -493,17 +492,17 @@ func (b *Bot) handleNext(c tele.Context) error {
 	}
 
 	// Неизвестный статус
-	return c.Send("❌ Неожиданный ответ от системы")
+	return c.Send(MsgErrorUnexpectedResponse)
 }
 
 // handleRephrase обрабатывает команду /rephrase
 func (b *Bot) handleRephrase(c tele.Context) error {
 	// Устанавливаем состояние "переформулировка"
 	state := b.getOrCreateState(c.Sender().ID)
-	state.State = "rephrasing"
+	state.State = StateRephrasing
 	state.TempData = make(map[string]string)
 
-	return c.Send("🔄 Опиши, что именно не подходит в текущем шаге?\n\nНапример: \"Слишком сложно\", \"Непонятно что делать\", \"Нужно что-то проще\"")
+	return c.Send(MsgRephrasePrompt)
 }
 
 // handleSimpler обрабатывает команду /simpler
@@ -512,46 +511,46 @@ func (b *Bot) handleSimpler(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении цели")
+		return c.Send(MsgErrorGoal)
 	}
 
 	// Проверяем статус цели
-	if goal.Status == "completed" {
-		return c.Send("✅ Эта цель уже завершена!\n\nСоздай новую цель командой /newgoal или выбери другую из списка /goals")
+	if goal.Status == GoalStatusCompleted {
+		return c.Send(MsgGoalAlreadyCompleted)
 	}
 
 	currentStep, err := b.repo.GetCurrentStep(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("✅ Поздравляю! Ты выполнил все шаги для этой цели.\n\nИспользуй /next чтобы получить следующий шаг")
+		return c.Send(MsgAllStepsCompleted)
 	}
 
 	// Переформулируем шаг с просьбой сделать его проще
-	response, err := b.llmClient.RephraseStep(goal, currentStep, "Сделай этот шаг максимально простым - от 5 минут до максимум 1 дня. Разбей на самую простую возможную задачу.")
+	response, err := b.llmClient.RephraseStep(goal, currentStep, MsgSimplifyPrompt)
 	if err != nil {
-		return c.Send("❌ Ошибка при упрощении шага")
+		return c.Send(MsgErrorSimplifyStep)
 	}
 
 	// Обновляем шаг
 	currentStep.Text = response.Step
-	currentStep.Rephrase("Пользователь запросил упрощение шага")
+	currentStep.Rephrase(MsgUserRequestedSimplification)
 	if err := b.repo.UpdateStep(currentStep); err != nil {
-		return c.Send("❌ Ошибка при обновлении шага")
+		return c.Send(MsgErrorUpdateStep)
 	}
 
-	message := fmt.Sprintf("🔄 Шаг упрощен:\n\n**%s**\n\n💡 Теперь этот шаг должен быть намного проще!", currentStep.Text)
+	message := fmt.Sprintf(MsgStepSimplifiedTemplate, currentStep.Text)
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-	btnDone := menu.Text("✅ Выполнил")
-	btnRephrase := menu.Text("🔄 Переформулировать")
+	btnDone := menu.Text(BtnTextDone)
+	btnRephrase := menu.Text(BtnTextRephrase)
 
 	menu.Reply(
 		menu.Row(btnDone),
@@ -567,15 +566,15 @@ func (b *Bot) handleSwitch(c tele.Context) error {
 
 	goals, err := b.repo.GetUserGoals(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении целей")
+		return c.Send(MsgErrorSteps)
 	}
 
 	if len(goals) == 0 {
-		return c.Send("📝 У тебя нет целей для переключения")
+		return c.Send(MsgNoGoalsForSwitch)
 	}
 
 	// TODO: Реализовать inline кнопки для выбора цели
-	return c.Send("🔄 Выбери цель для переключения:\n\n" + b.formatGoalsList(goals))
+	return c.Send(MsgSwitchGoalsPrompt + b.formatGoalsList(goals))
 }
 
 // handleText обрабатывает текстовые сообщения
@@ -587,11 +586,11 @@ func (b *Bot) handleText(c tele.Context) error {
 	log.Printf("🔍 Состояние пользователя: %s", state.State)
 
 	switch state.State {
-	case "waiting_goal_description":
+	case StateWaitingGoalDescription:
 		// Генерируем название цели через LLM
 		title, err := b.llmClient.GenerateGoalTitle(text)
 		if err != nil {
-			return c.Send("❌ Ошибка при генерации названия цели")
+			return c.Send(MsgErrorGenerateStep)
 		}
 
 		// Создаем цель
@@ -599,57 +598,57 @@ func (b *Bot) handleText(c tele.Context) error {
 		goal := models.NewGoal(userID, title, text)
 
 		if err := b.repo.CreateGoal(goal); err != nil {
-			return c.Send("❌ Ошибка при создании цели")
+			return c.Send(MsgErrorCreateGoal)
 		}
 
 		// Устанавливаем как активную
 		user, err := b.repo.GetUser(userID)
 		if err != nil {
-			return c.Send("❌ Ошибка при получении пользователя")
+			return c.Send(MsgErrorUserData)
 		}
 		user.ActiveGoalID = goal.ID
 		if err := b.repo.UpdateUser(user); err != nil {
-			return c.Send("❌ Ошибка при обновлении пользователя")
+			return c.Send(MsgErrorUpdateUser)
 		}
 		log.Printf("🔍 Пользователь: %+v", user)
 		// Сбрасываем состояние
-		state.State = "idle"
+		state.State = StateIdle
 		state.TempData = make(map[string]string)
 
-		message := fmt.Sprintf("🎯 Цель создана!\n\n**Название:** %s\n**Описание:** %s\n\nИспользуй /next чтобы получить первый шаг", goal.Title, goal.Description)
+		message := fmt.Sprintf(MsgGoalCreatedTemplate, goal.Title, goal.Description)
 		return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 
-	case "gathering_context":
+	case StateGatheringContext:
 		// Обрабатываем ответ на вопрос о контексте
 		goalID := state.TempData["goal_id"]
 		question := state.TempData["context_question"]
 
 		if goalID == "" {
-			return c.Send("❌ Ошибка: не найден ID цели")
+			return c.Send(MsgGoalNotFoundError)
 		}
 
 		// Получаем цель
 		goal, err := b.repo.GetGoal(goalID)
 		if err != nil {
-			return c.Send("❌ Ошибка при получении цели")
+			return c.Send(MsgErrorGoal)
 		}
 
 		// Добавляем уточнение в контекст
 		goal.AddClarification(question, text)
 		if err := b.repo.UpdateGoal(goal); err != nil {
-			return c.Send("❌ Ошибка при обновлении цели")
+			return c.Send(MsgErrorUpdateGoal)
 		}
 
 		// Проверяем, нужен ли еще контекст
 		contextResponse, err := b.llmClient.GatherContext(goal)
 		if err != nil {
-			return c.Send("❌ Ошибка при проверке контекста")
+			return c.Send(MsgErrorGatherContext)
 		}
 
-		if contextResponse.Status == "need_context" {
+		if contextResponse.Status == LLMStatusNeedContext {
 			// Нужен еще контекст
 			state.TempData["context_question"] = contextResponse.Question
-			message := fmt.Sprintf("🔍 Спасибо! Теперь еще один вопрос:\n\n**%s**", contextResponse.Question)
+			message := fmt.Sprintf(MsgContextThanksTemplate, contextResponse.Question)
 			return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 		}
 
@@ -657,48 +656,47 @@ func (b *Bot) handleText(c tele.Context) error {
 		completedSteps := []*models.Step{} // Пустой массив для первого шага
 		response, err := b.llmClient.GenerateStep(goal, completedSteps)
 		if err != nil {
-			return c.Send("❌ Ошибка при генерации шага")
+			return c.Send(MsgErrorGenerateStep)
 		}
 
 		// Сбрасываем состояние
-		state.State = "idle"
+		state.State = StateIdle
 		state.TempData = make(map[string]string)
 
 		// Обрабатываем ответ LLM
-		if response.Status == "need_clarification" {
-			return c.Send(fmt.Sprintf("❓ %s", response.Question))
+		if response.Status == LLMStatusNeedClarification {
+			return c.Send(fmt.Sprintf(MsgClarificationTemplate, response.Question))
 		}
 
-		if response.Status == "goal_completed" {
+		if response.Status == LLMStatusGoalCompleted {
 			// Получаем пользователя для завершения цели
 			userID := strconv.FormatInt(c.Sender().ID, 10)
 			user, err := b.repo.GetUser(userID)
 			if err != nil {
-				return c.Send("❌ Ошибка при получении пользователя")
+				return c.Send(MsgErrorUserData)
 			}
 
 			if err := b.completeGoal(goal, user, response.CompletionReason); err != nil {
-				return c.Send("❌ Ошибка при завершении цели")
+				return c.Send(MsgErrorUpdateGoal)
 			}
-			message := fmt.Sprintf("🎉 **Поздравляю! Цель достигнута!**\n\n**%s**\n\n%s\n\nСоздай новую цель командой /newgoal",
-				goal.Title, response.CompletionReason)
+			message := fmt.Sprintf(MsgGoalCompletedTemplate, goal.Title, response.CompletionReason)
 			return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 		}
 
-		if response.Status == "near_completion" {
+		if response.Status == LLMStatusNearCompletion {
 			// Создаем новый шаг
 			newStep := models.NewStep(goal.ID, response.Step)
 			if err := b.repo.CreateStep(newStep); err != nil {
-				return c.Send("❌ Ошибка при создании шага")
+				return c.Send(MsgErrorCreateStep)
 			}
 
-			message := fmt.Sprintf("🎯 **Почти готово! Осталось совсем немного:**\n\n%s\n\n💡 После этого шага цель может быть достигнута!", newStep.Text)
+			message := fmt.Sprintf(MsgNearCompletionTemplate, newStep.Text)
 
 			menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-			btnDone := menu.Text("✅ Выполнил")
-			btnRephrase := menu.Text("🔄 Переформулировать")
-			btnSimpler := menu.Text("🔽 Упростить")
-			btnComplete := menu.Text("🎉 Завершить цель")
+			btnDone := menu.Text(BtnTextDone)
+			btnRephrase := menu.Text(BtnTextRephrase)
+			btnSimpler := menu.Text(BtnTextSimpler)
+			btnComplete := menu.Text(BtnTextComplete)
 
 			menu.Reply(
 				menu.Row(btnDone),
@@ -709,19 +707,19 @@ func (b *Bot) handleText(c tele.Context) error {
 			return c.Send(message, menu, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 		}
 
-		if response.Status == "ok" {
+		if response.Status == LLMStatusOK {
 			// Создаем новый шаг
 			newStep := models.NewStep(goal.ID, response.Step)
 			if err := b.repo.CreateStep(newStep); err != nil {
-				return c.Send("❌ Ошибка при создании шага")
+				return c.Send(MsgErrorCreateStep)
 			}
 
-			message := fmt.Sprintf("📝 **Первый шаг:**\n\n%s", newStep.Text)
+			message := fmt.Sprintf(MsgFirstStepTemplate, newStep.Text)
 
 			menu := &tele.ReplyMarkup{ResizeKeyboard: true}
-			btnDone := menu.Text("✅ Выполнил")
-			btnRephrase := menu.Text("🔄 Переформулировать")
-			btnSimpler := menu.Text("🔽 Упростить")
+			btnDone := menu.Text(BtnTextDone)
+			btnRephrase := menu.Text(BtnTextRephrase)
+			btnSimpler := menu.Text(BtnTextSimpler)
 
 			menu.Reply(
 				menu.Row(btnDone),
@@ -731,47 +729,47 @@ func (b *Bot) handleText(c tele.Context) error {
 			return c.Send(message, menu, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 		}
 
-		return c.Send("❌ Неожиданный ответ от системы")
+		return c.Send(MsgErrorUnexpectedResponse)
 
-	case "rephrasing":
+	case StateRephrasing:
 		userID := strconv.FormatInt(c.Sender().ID, 10)
 		user, err := b.repo.GetUser(userID)
 		if err != nil {
-			return c.Send("❌ Ошибка при получении данных пользователя")
+			return c.Send(MsgErrorUserData)
 		}
 
 		currentStep, err := b.repo.GetCurrentStep(user.ActiveGoalID)
 		if err != nil {
-			return c.Send("❌ Ошибка при получении текущего шага")
+			return c.Send(MsgCurrentStepError)
 		}
 
 		goal, err := b.repo.GetGoal(user.ActiveGoalID)
 		if err != nil {
-			return c.Send("❌ Ошибка при получении цели")
+			return c.Send(MsgErrorGoal)
 		}
 
 		// Переформулируем шаг через LLM
 		response, err := b.llmClient.RephraseStep(goal, currentStep, text)
 		if err != nil {
-			return c.Send("❌ Ошибка при переформулировке шага")
+			return c.Send(MsgErrorRephraseStep)
 		}
 
 		// Обновляем шаг
 		currentStep.Text = response.Step
 		currentStep.Rephrase(text)
 		if err := b.repo.UpdateStep(currentStep); err != nil {
-			return c.Send("❌ Ошибка при обновлении шага")
+			return c.Send(MsgErrorUpdateStep)
 		}
 
 		// Сбрасываем состояние
-		state.State = "idle"
+		state.State = StateIdle
 		state.TempData = make(map[string]string)
 
-		message := fmt.Sprintf("🔄 Шаг переформулирован:\n\n%s", currentStep.Text)
+		message := fmt.Sprintf(MsgStepRephrasedTemplate, currentStep.Text)
 		return c.Send(message)
 
 	default:
-		return c.Send("💡 Используй команды для работы с ботом. Напиши /help для справки")
+		return c.Send(MsgHelpDefault)
 	}
 }
 
@@ -783,7 +781,7 @@ func (b *Bot) getOrCreateState(userID int64) *UserState {
 
 	state := &UserState{
 		UserID:   userID,
-		State:    "idle",
+		State:    StateIdle,
 		TempData: make(map[string]string),
 	}
 	b.states[userID] = state
@@ -802,7 +800,7 @@ func (b *Bot) formatGoalsList(goals []*models.Goal) string {
 // completeGoal завершает цель и сбрасывает активную цель пользователя
 func (b *Bot) completeGoal(goal *models.Goal, user *models.User, completionReason string) error {
 	// Отмечаем цель как завершенную
-	goal.Status = "completed"
+	goal.Status = GoalStatusCompleted
 	now := time.Now()
 	goal.CompletedAt = &now
 	goal.UpdatedAt = now
@@ -826,36 +824,35 @@ func (b *Bot) handleComplete(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении цели")
+		return c.Send(MsgErrorGoal)
 	}
 
 	// Отмечаем цель как завершенную
-	goal.Status = "completed"
+	goal.Status = GoalStatusCompleted
 	now := time.Now()
 	goal.CompletedAt = &now
 	goal.UpdatedAt = now
 
 	if err := b.repo.UpdateGoal(goal); err != nil {
-		return c.Send("❌ Ошибка при обновлении цели")
+		return c.Send(MsgErrorUpdateGoal)
 	}
 
 	// Сбрасываем активную цель пользователя
 	user.ActiveGoalID = ""
 	if err := b.repo.UpdateUser(user); err != nil {
-		return c.Send("❌ Ошибка при обновлении пользователя")
+		return c.Send(MsgErrorUpdateUser)
 	}
 
-	message := fmt.Sprintf("🎉 **Поздравляю! Цель достигнута!**\n\n**%s**\n\nСоздай новую цель командой /newgoal",
-		goal.Title)
+	message := fmt.Sprintf(MsgGoalCompletedManualTemplate, goal.Title)
 	return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 }
 
@@ -865,19 +862,19 @@ func (b *Bot) handleContext(c tele.Context) error {
 
 	user, err := b.repo.GetUser(userID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении данных пользователя")
+		return c.Send(MsgErrorUserData)
 	}
 
 	if user.ActiveGoalID == "" {
-		return c.Send("📝 У тебя нет активной цели")
+		return c.Send(MsgNoActiveGoal)
 	}
 
 	goal, err := b.repo.GetGoal(user.ActiveGoalID)
 	if err != nil {
-		return c.Send("❌ Ошибка при получении цели")
+		return c.Send(MsgErrorGoal)
 	}
 
-	message := fmt.Sprintf("📋 **Контекст для цели:** %s\n\n", goal.Title)
+	message := fmt.Sprintf(MsgContextSummaryTemplate, goal.Title)
 	message += goal.GetContextSummary()
 
 	return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
