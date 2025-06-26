@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -94,6 +95,7 @@ func (r *FileRepository) loadUsers() error {
 
 // saveUsers сохраняет пользователей в файл
 func (r *FileRepository) saveUsers() error {
+
 	r.mutex.RLock()
 	users := make([]*models.User, 0, len(r.users))
 	for _, user := range r.users {
@@ -107,7 +109,13 @@ func (r *FileRepository) saveUsers() error {
 	}
 
 	filename := filepath.Join(r.dataDir, "users.json")
-	return os.WriteFile(filename, data, 0644)
+
+	err = os.WriteFile(filename, data, 0644)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // loadGoals загружает цели из файла
@@ -201,7 +209,6 @@ func (r *FileRepository) saveSteps() error {
 }
 
 // Реализация методов интерфейса Repository
-
 func (r *FileRepository) GetUser(userID string) (*models.User, error) {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
@@ -216,25 +223,29 @@ func (r *FileRepository) GetUser(userID string) (*models.User, error) {
 
 func (r *FileRepository) CreateUser(user *models.User) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.users[user.ID]; exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("user already exists: %s", user.ID)
 	}
 
 	r.users[user.ID] = user
+	r.mutex.Unlock()
+
 	return r.saveUsers()
 }
 
 func (r *FileRepository) UpdateUser(user *models.User) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.users[user.ID]; !exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("user not found: %s", user.ID)
 	}
 
 	r.users[user.ID] = user
+	r.mutex.Unlock()
+
 	return r.saveUsers()
 }
 
@@ -266,34 +277,38 @@ func (r *FileRepository) GetUserGoals(userID string) ([]*models.Goal, error) {
 
 func (r *FileRepository) CreateGoal(goal *models.Goal) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.goals[goal.ID]; exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("goal already exists: %s", goal.ID)
 	}
 
 	r.goals[goal.ID] = goal
+	r.mutex.Unlock()
+
 	return r.saveGoals()
 }
 
 func (r *FileRepository) UpdateGoal(goal *models.Goal) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.goals[goal.ID]; !exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("goal not found: %s", goal.ID)
 	}
 
 	goal.UpdatedAt = time.Now()
 	r.goals[goal.ID] = goal
+	r.mutex.Unlock()
+
 	return r.saveGoals()
 }
 
 func (r *FileRepository) DeleteGoal(goalID string) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.goals[goalID]; !exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("goal not found: %s", goalID)
 	}
 
@@ -305,6 +320,8 @@ func (r *FileRepository) DeleteGoal(goalID string) error {
 			delete(r.steps, stepID)
 		}
 	}
+
+	r.mutex.Unlock()
 
 	if err := r.saveGoals(); err != nil {
 		return err
@@ -336,6 +353,11 @@ func (r *FileRepository) GetGoalSteps(goalID string) ([]*models.Step, error) {
 		}
 	}
 
+	// Сортируем шаги по дате создания (от старых к новым)
+	sort.Slice(goalSteps, func(i, j int) bool {
+		return goalSteps[i].CreatedAt.Before(goalSteps[j].CreatedAt)
+	})
+
 	return goalSteps, nil
 }
 
@@ -362,37 +384,43 @@ func (r *FileRepository) GetCurrentStep(goalID string) (*models.Step, error) {
 
 func (r *FileRepository) CreateStep(step *models.Step) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.steps[step.ID]; exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("step already exists: %s", step.ID)
 	}
 
 	r.steps[step.ID] = step
+	r.mutex.Unlock()
+
 	return r.saveSteps()
 }
 
 func (r *FileRepository) UpdateStep(step *models.Step) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.steps[step.ID]; !exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("step not found: %s", step.ID)
 	}
 
 	r.steps[step.ID] = step
+	r.mutex.Unlock()
+
 	return r.saveSteps()
 }
 
 func (r *FileRepository) DeleteStep(stepID string) error {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
 
 	if _, exists := r.steps[stepID]; !exists {
+		r.mutex.Unlock()
 		return fmt.Errorf("step not found: %s", stepID)
 	}
 
 	delete(r.steps, stepID)
+	r.mutex.Unlock()
+
 	return r.saveSteps()
 }
 

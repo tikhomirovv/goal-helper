@@ -29,8 +29,8 @@ func main() {
 		log.Fatalf("Failed to initialize repository: %v", err)
 	}
 
-	// Инициализируем LLM клиент
-	llmClient := llm.NewClient(os.Getenv("LLM_API_KEY"))
+	// Инициализируем LLM клиент (OpenAI)
+	llmClient := llm.NewOpenAIClient(os.Getenv("LLM_API_KEY"))
 
 	// Создаем и запускаем бота
 	botInstance := bot.NewBot(botToken, repo, llmClient)

@@ -24,7 +24,7 @@ type Bot struct {
 // UserState представляет состояние пользователя в FSM
 type UserState struct {
 	UserID   int64
-	State    string            // "idle", "creating_goal", "waiting_title", "waiting_description"
+	State    string            // "idle", "waiting_goal_description", "rephrasing"
 	TempData map[string]string // Временные данные для создания цели
 }
 
@@ -86,10 +86,10 @@ func (b *Bot) handleStart(c tele.Context) error {
 	firstName := c.Sender().FirstName
 
 	// Проверяем, существует ли пользователь
-	user, err := b.repo.GetUser(userID)
+	_, err := b.repo.GetUser(userID)
 	if err != nil {
 		// Создаем нового пользователя
-		user = models.NewUser(userID, username, firstName)
+		user := models.NewUser(userID, username, firstName)
 		if err := b.repo.CreateUser(user); err != nil {
 			return c.Send("❌ Ошибка при создании пользователя")
 		}
@@ -181,10 +181,10 @@ func (b *Bot) handleGoals(c tele.Context) error {
 func (b *Bot) handleNewGoal(c tele.Context) error {
 	// Устанавливаем состояние "создание цели"
 	state := b.getOrCreateState(c.Sender().ID)
-	state.State = "waiting_title"
+	state.State = "waiting_goal_description"
 	state.TempData = make(map[string]string)
 
-	return c.Send("🎯 Отлично! Давай создадим новую цель.\n\nКак называется твоя цель?")
+	return c.Send("🎯 Отлично! Давай создадим новую цель.\n\nОпиши свою цель подробно - что именно ты хочешь достичь? Я сам придумаю подходящее название.")
 }
 
 // handleStatus обрабатывает команду /status
@@ -304,20 +304,34 @@ func (b *Bot) handleNext(c tele.Context) error {
 		return c.Send("❌ Ошибка при получении цели")
 	}
 
-	// Получаем выполненные шаги
+	// Получаем все шаги для цели
 	allSteps, err := b.repo.GetGoalSteps(goal.ID)
 	if err != nil {
 		return c.Send("❌ Ошибка при получении шагов")
 	}
 
+	// Проверяем, есть ли невыполненные шаги
+	var currentStep *models.Step
 	var completedSteps []*models.Step
+
 	for _, step := range allSteps {
 		if step.IsCompleted() {
 			completedSteps = append(completedSteps, step)
+		} else {
+			// Нашли невыполненный шаг
+			if currentStep == nil || step.CreatedAt.Before(currentStep.CreatedAt) {
+				currentStep = step
+			}
 		}
 	}
 
-	// Генерируем следующий шаг через LLM
+	// Если есть невыполненный шаг, предлагаем его выполнить
+	if currentStep != nil {
+		message := fmt.Sprintf("⏳ У тебя есть невыполненный шаг:\n\n**%s**\n\nСначала выполни этот шаг командой /done, а потом получи следующий.", currentStep.Text)
+		return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
+	}
+
+	// Все шаги выполнены, генерируем следующий
 	response, err := b.llmClient.GenerateStep(goal, completedSteps)
 	if err != nil {
 		return c.Send("❌ Ошибка при генерации шага")
@@ -379,22 +393,20 @@ func (b *Bot) handleText(c tele.Context) error {
 	state := b.getOrCreateState(c.Sender().ID)
 	text := c.Text()
 
-	switch state.State {
-	case "waiting_title":
-		state.TempData["title"] = text
-		state.State = "waiting_description"
-		return c.Send("📝 Отлично! Теперь опиши свою цель подробнее (или отправь точку, если описание не нужно)")
+	log.Printf("🔍 Текст пользователя: %s", text)
+	log.Printf("🔍 Состояние пользователя: %s", state.State)
 
-	case "waiting_description":
-		if text == "." {
-			state.TempData["description"] = ""
-		} else {
-			state.TempData["description"] = text
+	switch state.State {
+	case "waiting_goal_description":
+		// Генерируем название цели через LLM
+		title, err := b.llmClient.GenerateGoalTitle(text)
+		if err != nil {
+			return c.Send("❌ Ошибка при генерации названия цели")
 		}
 
 		// Создаем цель
 		userID := strconv.FormatInt(c.Sender().ID, 10)
-		goal := models.NewGoal(userID, state.TempData["title"], state.TempData["description"])
+		goal := models.NewGoal(userID, title, text)
 
 		if err := b.repo.CreateGoal(goal); err != nil {
 			return c.Send("❌ Ошибка при создании цели")
@@ -409,13 +421,13 @@ func (b *Bot) handleText(c tele.Context) error {
 		if err := b.repo.UpdateUser(user); err != nil {
 			return c.Send("❌ Ошибка при обновлении пользователя")
 		}
-
+		log.Printf("🔍 Пользователь: %+v", user)
 		// Сбрасываем состояние
 		state.State = "idle"
 		state.TempData = make(map[string]string)
 
-		message := fmt.Sprintf("🎯 Цель \"%s\" создана и установлена как активная!\n\nИспользуй /next чтобы получить первый шаг", goal.Title)
-		return c.Send(message)
+		message := fmt.Sprintf("🎯 Цель создана!\n\n**Название:** %s\n**Описание:** %s\n\nИспользуй /next чтобы получить первый шаг", goal.Title, goal.Description)
+		return c.Send(message, &tele.SendOptions{ParseMode: tele.ModeMarkdown})
 
 	case "rephrasing":
 		userID := strconv.FormatInt(c.Sender().ID, 10)
