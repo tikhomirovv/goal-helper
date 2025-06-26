@@ -14,9 +14,10 @@ type Client interface {
 
 // StepResponse представляет ответ LLM на генерацию шага
 type StepResponse struct {
-	Status   string `json:"status"` // "ok" или "need_clarification"
-	Step     string `json:"step,omitempty"`
-	Question string `json:"question,omitempty"`
+	Status           string `json:"status"` // "ok", "need_clarification", "goal_completed", "near_completion"
+	Step             string `json:"step,omitempty"`
+	Question         string `json:"question,omitempty"`
+	CompletionReason string `json:"completion_reason,omitempty"` // Причина завершения цели
 }
 
 // ClarificationResponse представляет ответ LLM на уточнение цели

@@ -37,16 +37,40 @@ func NewOpenAIClient(apiKey string) Client {
 func (c *OpenAIClient) GenerateStep(goal *models.Goal, completedSteps []*models.Step) (*StepResponse, error) {
 	prompt := c.buildStepPrompt(goal, completedSteps)
 
+	log.Printf("🔍 Отправляем запрос к OpenAI для цели: %s", goal.Title)
+	log.Printf("🔍 Длина промпта: %d символов", len(prompt))
+
 	response, err := c.callOpenAI(prompt)
 	if err != nil {
+		log.Printf("❌ Ошибка при вызове OpenAI: %v", err)
 		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
 	}
 
+	log.Printf("🔍 Получен ответ от OpenAI: %s", response)
+
 	var stepResponse StepResponse
 	if err := json.Unmarshal([]byte(response), &stepResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
+		log.Printf("❌ Ошибка при парсинге ответа OpenAI: %v", err)
+		log.Printf("🔍 Сырой ответ: %s", response)
+
+		// Пытаемся найти JSON в ответе
+		jsonStart := strings.Index(response, "{")
+		jsonEnd := strings.LastIndex(response, "}")
+
+		if jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart {
+			jsonPart := response[jsonStart : jsonEnd+1]
+			log.Printf("🔍 Попытка парсинга найденного JSON: %s", jsonPart)
+
+			if err := json.Unmarshal([]byte(jsonPart), &stepResponse); err != nil {
+				log.Printf("❌ Ошибка при парсинге найденного JSON: %v", err)
+				return nil, fmt.Errorf("failed to parse OpenAI response JSON: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
+		}
 	}
 
+	log.Printf("🔍 Успешно распарсен ответ: статус=%s", stepResponse.Status)
 	return &stepResponse, nil
 }
 
@@ -87,28 +111,54 @@ func (c *OpenAIClient) ClarifyGoal(goalTitle, goalDescription string) (*Clarific
 // GenerateGoalTitle генерирует название цели на основе описания
 func (c *OpenAIClient) GenerateGoalTitle(description string) (string, error) {
 	prompt := c.buildTitlePrompt(description)
+	log.Printf("🔍 Генерируем название цели для описания: %s", description)
 	log.Printf("🔍 Prompt для генерации названия цели: %s", prompt)
 
 	response, err := c.callOpenAI(prompt)
 	if err != nil {
+		log.Printf("❌ Ошибка при генерации названия цели: %v", err)
 		return "", fmt.Errorf("failed to call OpenAI: %w", err)
 	}
+
+	log.Printf("🔍 Получен ответ для названия цели: %s", response)
+
 	var titleResponse struct {
 		Title string `json:"title"`
 	}
 	if err := json.Unmarshal([]byte(response), &titleResponse); err != nil {
-		return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
+		log.Printf("❌ Ошибка при парсинге названия цели: %v", err)
+		log.Printf("🔍 Сырой ответ: %s", response)
+
+		// Пытаемся найти JSON в ответе
+		jsonStart := strings.Index(response, "{")
+		jsonEnd := strings.LastIndex(response, "}")
+
+		if jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart {
+			jsonPart := response[jsonStart : jsonEnd+1]
+			log.Printf("🔍 Попытка парсинга найденного JSON: %s", jsonPart)
+
+			if err := json.Unmarshal([]byte(jsonPart), &titleResponse); err != nil {
+				log.Printf("❌ Ошибка при парсинге найденного JSON: %v", err)
+				return "", fmt.Errorf("failed to parse OpenAI response JSON: %w", err)
+			}
+		} else {
+			return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
+		}
 	}
 
+	log.Printf("🔍 Успешно сгенерировано название: %s", titleResponse.Title)
 	return titleResponse.Title, nil
 }
 
 // callOpenAI отправляет запрос к OpenAI API
 func (c *OpenAIClient) callOpenAI(prompt string) (string, error) {
-	// Если API ключ не установлен, используем заглушку для тестирования
+	// Проверяем, что API ключ установлен
 	if c.apiKey == "" {
-		return c.mockResponse(prompt)
+		log.Printf("❌ OpenAI API ключ не установлен")
+		return "", fmt.Errorf("OpenAI API key is not set")
 	}
+
+	log.Printf("🔍 Отправляем запрос к OpenAI API...")
 
 	// Структура запроса к OpenAI
 	requestBody := map[string]any{
@@ -125,36 +175,49 @@ func (c *OpenAIClient) callOpenAI(prompt string) (string, error) {
 		},
 		"temperature": 0.7,
 		"max_tokens":  500,
+		"response_format": map[string]string{
+			"type": "json_object",
+		},
 	}
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
+		log.Printf("❌ Ошибка при маршалинге запроса: %v", err)
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", c.baseURL, bytes.NewBuffer(jsonData))
 	if err != nil {
+		log.Printf("❌ Ошибка при создании HTTP запроса: %v", err)
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
+	log.Printf("🔍 Отправляем HTTP запрос к %s", c.baseURL)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.Printf("❌ Ошибка при отправке HTTP запроса: %v", err)
 		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	log.Printf("🔍 Получен HTTP ответ: статус %d", resp.StatusCode)
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		log.Printf("❌ OpenAI API вернул ошибку: %s - %s", resp.Status, string(body))
 		return "", fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("❌ Ошибка при чтении тела ответа: %v", err)
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
+
+	log.Printf("🔍 Размер ответа: %d байт", len(body))
 
 	// Парсим ответ OpenAI
 	var openAIResponse struct {
@@ -166,27 +229,20 @@ func (c *OpenAIClient) callOpenAI(prompt string) (string, error) {
 	}
 
 	if err := json.Unmarshal(body, &openAIResponse); err != nil {
+		log.Printf("❌ Ошибка при парсинге ответа OpenAI: %v", err)
+		log.Printf("🔍 Сырое тело ответа: %s", string(body))
 		return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
 	}
 
 	if len(openAIResponse.Choices) == 0 {
+		log.Printf("❌ OpenAI вернул пустой список choices")
 		return "", fmt.Errorf("no choices in OpenAI response")
 	}
 
-	return openAIResponse.Choices[0].Message.Content, nil
-}
+	content := openAIResponse.Choices[0].Message.Content
+	log.Printf("🔍 Успешно получен контент от OpenAI: %s", content)
 
-// mockResponse возвращает заглушку для тестирования без API ключа
-func (c *OpenAIClient) mockResponse(prompt string) (string, error) {
-	if strings.Contains(prompt, "уточн") {
-		return `{"status": "need_clarification", "question": "У тебя уже есть конкретная идея для этой цели?"}`, nil
-	}
-
-	if strings.Contains(prompt, "название") {
-		return `{"title": "Достичь поставленной цели"}`, nil
-	}
-
-	return `{"status": "ok", "step": "Начни с составления плана на бумаге"}`, nil
+	return content, nil
 }
 
 // buildStepPrompt формирует промпт для генерации шага
@@ -207,12 +263,19 @@ func (c *OpenAIClient) buildStepPrompt(goal *models.Goal, completedSteps []*mode
 		prompt.WriteString("\n")
 	}
 
-	prompt.WriteString("Сгенерируй следующий логичный шаг. Если не уверен — задай вопрос.\n\n")
-	prompt.WriteString("Формат ответа (JSON):\n")
+	// Добавляем логику завершения цели
+	prompt.WriteString("ВАЖНО: Проанализируй, достигнута ли уже цель на основе выполненных шагов.\n")
+	prompt.WriteString("Если цель достигнута - верни статус 'goal_completed' и объясни почему.\n")
+	prompt.WriteString("Если нужно еще 1-2 шага для завершения - верни статус 'near_completion'.\n")
+	prompt.WriteString("Если цель еще далеко - верни статус 'ok' и сгенерируй следующий шаг.\n\n")
+
+	prompt.WriteString("Сгенерируй следующий логичный шаг или определи завершение.\n\n")
+	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
 	prompt.WriteString(`{
-  "status": "ok" | "need_clarification",
+  "status": "ok" | "need_clarification" | "goal_completed" | "near_completion",
   "step": "текст шага",
-  "question": "уточняющий вопрос (если нужен)"
+  "question": "уточняющий вопрос (если нужен)",
+  "completion_reason": "причина завершения (если цель достигнута)"
 }`)
 
 	return prompt.String()
@@ -226,7 +289,7 @@ func (c *OpenAIClient) buildRephrasePrompt(goal *models.Goal, currentStep *model
 	prompt.WriteString("Текущий шаг: " + currentStep.Text + "\n")
 	prompt.WriteString("Комментарий пользователя: " + userComment + "\n\n")
 	prompt.WriteString("Сформулируй альтернативный шаг на том же уровне сложности.\n\n")
-	prompt.WriteString("Формат ответа (JSON):\n")
+	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
 	prompt.WriteString(`{
   "status": "ok",
   "step": "новый текст шага"
@@ -244,7 +307,7 @@ func (c *OpenAIClient) buildClarificationPrompt(goalTitle, goalDescription strin
 		prompt.WriteString("Описание: " + goalDescription + "\n")
 	}
 	prompt.WriteString("\nЕсли цель недостаточно понятна для генерации шага — верни статус и вопрос:\n\n")
-	prompt.WriteString("Формат ответа (JSON):\n")
+	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
 	prompt.WriteString(`{
   "status": "need_clarification",
   "question": "уточняющий вопрос"
@@ -264,7 +327,7 @@ func (c *OpenAIClient) buildTitlePrompt(description string) string {
 	prompt.WriteString("- Конкретным и понятным\n")
 	prompt.WriteString("- Мотивирующим\n")
 	prompt.WriteString("- Без кавычек\n\n")
-	prompt.WriteString("Формат ответа (JSON):\n")
+	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
 	prompt.WriteString(`{
   "title": "краткое название цели"
 }`)

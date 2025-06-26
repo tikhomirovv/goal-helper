@@ -17,13 +17,15 @@ type User struct {
 
 // Goal представляет цель пользователя
 type Goal struct {
-	ID          string    `json:"id"`          // Уникальный ID цели
-	UserID      string    `json:"user_id"`     // ID пользователя
-	Title       string    `json:"title"`       // Название цели
-	Description string    `json:"description"` // Описание цели
-	CreatedAt   time.Time `json:"created_at"`  // Дата создания
-	UpdatedAt   time.Time `json:"updated_at"`  // Дата обновления
-	Context     Context   `json:"context"`     // Контекст для LLM
+	ID          string     `json:"id"`                     // Уникальный ID цели
+	UserID      string     `json:"user_id"`                // ID пользователя
+	Title       string     `json:"title"`                  // Название цели
+	Description string     `json:"description"`            // Описание цели
+	CreatedAt   time.Time  `json:"created_at"`             // Дата создания
+	UpdatedAt   time.Time  `json:"updated_at"`             // Дата обновления
+	Context     Context    `json:"context"`                // Контекст для LLM
+	Status      string     `json:"status"`                 // "active", "completed", "abandoned"
+	CompletedAt *time.Time `json:"completed_at,omitempty"` // Дата завершения
 }
 
 // Step представляет шаг к достижению цели
@@ -63,6 +65,7 @@ func NewGoal(userID, title, description string) *Goal {
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 		Context:     Context{Clarifications: []string{}},
+		Status:      "active",
 	}
 }
 
