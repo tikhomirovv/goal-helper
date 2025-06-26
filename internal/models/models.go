@@ -1,6 +1,8 @@
 package models
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,4 +97,25 @@ func (s *Step) Complete() {
 func (s *Step) Rephrase(comment string) {
 	s.Rephrased = true
 	s.UserComment = comment
+}
+
+// AddClarification добавляет уточнение в контекст цели
+func (g *Goal) AddClarification(question, answer string) {
+	clarification := fmt.Sprintf("Вопрос: %s | Ответ: %s", question, answer)
+	g.Context.Clarifications = append(g.Context.Clarifications, clarification)
+	g.UpdatedAt = time.Now()
+}
+
+// GetContextSummary возвращает краткое описание собранного контекста
+func (g *Goal) GetContextSummary() string {
+	if len(g.Context.Clarifications) == 0 {
+		return "Контекст не собран"
+	}
+
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("Собрано %d уточнений:\n", len(g.Context.Clarifications)))
+	for i, clarification := range g.Context.Clarifications {
+		summary.WriteString(fmt.Sprintf("%d. %s\n", i+1, clarification))
+	}
+	return summary.String()
 }

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"goal-helper/internal/models"
@@ -15,76 +14,118 @@ import (
 
 // OpenAIClient представляет клиент для работы с OpenAI API
 type OpenAIClient struct {
-	apiKey     string
-	httpClient *http.Client
-	baseURL    string
-	model      string
+	apiKey       string
+	httpClient   *http.Client
+	baseURL      string
+	model        string
+	promptLoader *PromptLoader // Загрузчик промптов из файлов
+	promptUtils  *PromptUtils  // Утилиты для подготовки плейсхолдеров
+}
+
+// APIConfig представляет конфигурацию для API запроса
+type APIConfig struct {
+	Model   string // Модель для использования
+	BaseURL string // Базовый URL (responses или completions)
+}
+
+// DefaultAPIConfig возвращает конфигурацию по умолчанию
+func DefaultAPIConfig() APIConfig {
+	return APIConfig{
+		Model:   DefaultModel,
+		BaseURL: ResponsesAPIEndpoint, // Новый endpoint для структурированного вывода
+	}
+}
+
+// CompletionsAPIConfig возвращает конфигурацию для старого completions API
+func CompletionsAPIConfig() APIConfig {
+	return APIConfig{
+		Model:   CompletionsModel,
+		BaseURL: CompletionsAPIEndpoint,
+	}
 }
 
 // NewOpenAIClient создает новый OpenAI клиент
 func NewOpenAIClient(apiKey string) Client {
+	return NewOpenAIClientWithResponsesAPI(apiKey)
+}
+
+// NewOpenAIClientWithConfig создает новый OpenAI клиент с кастомной конфигурацией
+func NewOpenAIClientWithConfig(apiKey string, config APIConfig) Client {
 	return &OpenAIClient{
 		apiKey: apiKey,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: DefaultTimeout * time.Second,
 		},
-		baseURL: "https://api.openai.com/v1/chat/completions",
-		model:   "gpt-4o-mini-2024-07-18", // Можно сделать настраиваемым
+		baseURL:      config.BaseURL,
+		model:        config.Model,
+		promptLoader: NewPromptLoader(),
+		promptUtils:  NewPromptUtils(),
 	}
+}
+
+// NewOpenAIClientWithCompletionsAPI создает клиент для работы со старым Completions API
+func NewOpenAIClientWithCompletionsAPI(apiKey string) Client {
+	return NewOpenAIClientWithConfig(apiKey, CompletionsAPIConfig())
+}
+
+// NewOpenAIClientWithResponsesAPI создает клиент для работы с новым Responses API
+func NewOpenAIClientWithResponsesAPI(apiKey string) Client {
+	return NewOpenAIClientWithConfig(apiKey, DefaultAPIConfig())
+}
+
+// GenerateStepWithConfig генерирует следующий шаг для цели с кастомной конфигурацией
+func (c *OpenAIClient) GenerateStepWithConfig(goal *models.Goal, completedSteps []*models.Step, config APIConfig) (*StepResponse, error) {
+	// Загружаем промпт из файла
+	placeholders := c.promptUtils.BuildStepPromptPlaceholders(goal, completedSteps)
+	prompt, err := c.promptLoader.LoadPrompt(PromptStepGeneration, placeholders)
+	if err != nil {
+		log.Printf(LogPromptLoadError, err)
+		return nil, fmt.Errorf("failed to load prompt: %w", err)
+	}
+
+	log.Printf(LogSendingRequest, goal.Title)
+	log.Printf(LogPromptLength, len(prompt))
+
+	response, err := c.callOpenAI(prompt, config, StepResponseSchema)
+	if err != nil {
+		log.Printf(LogOpenAIError, err)
+		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
+	}
+
+	log.Printf(LogOpenAIResponse, response)
+
+	var stepResponse StepResponse
+	if err := UnmarshalLLMResponseWithLogging(response, &stepResponse, "генерация шага"); err != nil {
+		return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
+	}
+
+	log.Printf(LogSuccessResponse, stepResponse.Status)
+	return &stepResponse, nil
 }
 
 // GenerateStep генерирует следующий шаг для цели
 func (c *OpenAIClient) GenerateStep(goal *models.Goal, completedSteps []*models.Step) (*StepResponse, error) {
-	prompt := c.buildStepPrompt(goal, completedSteps)
-
-	log.Printf("🔍 Отправляем запрос к OpenAI для цели: %s", goal.Title)
-	log.Printf("🔍 Длина промпта: %d символов", len(prompt))
-
-	response, err := c.callOpenAI(prompt)
-	if err != nil {
-		log.Printf("❌ Ошибка при вызове OpenAI: %v", err)
-		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
-	}
-
-	log.Printf("🔍 Получен ответ от OpenAI: %s", response)
-
-	var stepResponse StepResponse
-	if err := json.Unmarshal([]byte(response), &stepResponse); err != nil {
-		log.Printf("❌ Ошибка при парсинге ответа OpenAI: %v", err)
-		log.Printf("🔍 Сырой ответ: %s", response)
-
-		// Пытаемся найти JSON в ответе
-		jsonStart := strings.Index(response, "{")
-		jsonEnd := strings.LastIndex(response, "}")
-
-		if jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart {
-			jsonPart := response[jsonStart : jsonEnd+1]
-			log.Printf("🔍 Попытка парсинга найденного JSON: %s", jsonPart)
-
-			if err := json.Unmarshal([]byte(jsonPart), &stepResponse); err != nil {
-				log.Printf("❌ Ошибка при парсинге найденного JSON: %v", err)
-				return nil, fmt.Errorf("failed to parse OpenAI response JSON: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
-		}
-	}
-
-	log.Printf("🔍 Успешно распарсен ответ: статус=%s", stepResponse.Status)
-	return &stepResponse, nil
+	return c.GenerateStepWithConfig(goal, completedSteps, DefaultAPIConfig())
 }
 
 // RephraseStep переформулирует текущий шаг
 func (c *OpenAIClient) RephraseStep(goal *models.Goal, currentStep *models.Step, userComment string) (*StepResponse, error) {
-	prompt := c.buildRephrasePrompt(goal, currentStep, userComment)
+	// Загружаем промпт из файла
+	placeholders := c.promptUtils.BuildRephrasePromptPlaceholders(goal, currentStep, userComment)
 
-	response, err := c.callOpenAI(prompt)
+	prompt, err := c.promptLoader.LoadPrompt(PromptStepRephrase, placeholders)
+	if err != nil {
+		log.Printf(LogPromptLoadError, err)
+		return nil, fmt.Errorf("failed to load prompt: %w", err)
+	}
+
+	response, err := c.callOpenAI(prompt, DefaultAPIConfig(), RephraseResponseSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
 	}
 
 	var stepResponse StepResponse
-	if err := json.Unmarshal([]byte(response), &stepResponse); err != nil {
+	if err := UnmarshalLLMResponseWithLogging(response, &stepResponse, "переформулировка шага"); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
 	}
 
@@ -93,15 +134,22 @@ func (c *OpenAIClient) RephraseStep(goal *models.Goal, currentStep *models.Step,
 
 // ClarifyGoal запрашивает уточнение цели
 func (c *OpenAIClient) ClarifyGoal(goalTitle, goalDescription string) (*ClarificationResponse, error) {
-	prompt := c.buildClarificationPrompt(goalTitle, goalDescription)
+	// Загружаем промпт из файла
+	placeholders := c.promptUtils.BuildClarificationPromptPlaceholders(goalTitle, goalDescription)
 
-	response, err := c.callOpenAI(prompt)
+	prompt, err := c.promptLoader.LoadPrompt(PromptGoalClarification, placeholders)
+	if err != nil {
+		log.Printf(LogPromptLoadError, err)
+		return nil, fmt.Errorf("failed to load prompt: %w", err)
+	}
+
+	response, err := c.callOpenAI(prompt, DefaultAPIConfig(), ClarificationResponseSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
 	}
 
 	var clarificationResponse ClarificationResponse
-	if err := json.Unmarshal([]byte(response), &clarificationResponse); err != nil {
+	if err := UnmarshalLLMResponseWithLogging(response, &clarificationResponse, "уточнение цели"); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
 	}
 
@@ -110,227 +158,286 @@ func (c *OpenAIClient) ClarifyGoal(goalTitle, goalDescription string) (*Clarific
 
 // GenerateGoalTitle генерирует название цели на основе описания
 func (c *OpenAIClient) GenerateGoalTitle(description string) (string, error) {
-	prompt := c.buildTitlePrompt(description)
-	log.Printf("🔍 Генерируем название цели для описания: %s", description)
-	log.Printf("🔍 Prompt для генерации названия цели: %s", prompt)
+	// Загружаем промпт из файла
+	placeholders := c.promptUtils.BuildTitlePromptPlaceholders(description)
 
-	response, err := c.callOpenAI(prompt)
+	prompt, err := c.promptLoader.LoadPrompt(PromptTitleGeneration, placeholders)
 	if err != nil {
-		log.Printf("❌ Ошибка при генерации названия цели: %v", err)
+		log.Printf(LogPromptLoadError, err)
+		return "", fmt.Errorf("failed to load prompt: %w", err)
+	}
+
+	log.Printf(LogTitleGeneration, description)
+	log.Printf(LogTitlePrompt, prompt)
+
+	response, err := c.callOpenAI(prompt, DefaultAPIConfig(), TitleResponseSchema)
+	if err != nil {
+		log.Printf(LogTitleError, err)
 		return "", fmt.Errorf("failed to call OpenAI: %w", err)
 	}
 
-	log.Printf("🔍 Получен ответ для названия цели: %s", response)
+	log.Printf(LogTitleResponse, response)
 
 	var titleResponse struct {
 		Title string `json:"title"`
 	}
-	if err := json.Unmarshal([]byte(response), &titleResponse); err != nil {
-		log.Printf("❌ Ошибка при парсинге названия цели: %v", err)
-		log.Printf("🔍 Сырой ответ: %s", response)
-
-		// Пытаемся найти JSON в ответе
-		jsonStart := strings.Index(response, "{")
-		jsonEnd := strings.LastIndex(response, "}")
-
-		if jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart {
-			jsonPart := response[jsonStart : jsonEnd+1]
-			log.Printf("🔍 Попытка парсинга найденного JSON: %s", jsonPart)
-
-			if err := json.Unmarshal([]byte(jsonPart), &titleResponse); err != nil {
-				log.Printf("❌ Ошибка при парсинге найденного JSON: %v", err)
-				return "", fmt.Errorf("failed to parse OpenAI response JSON: %w", err)
-			}
-		} else {
-			return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
-		}
+	if err := UnmarshalLLMResponseWithLogging(response, &titleResponse, "генерация названия цели"); err != nil {
+		return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
 	}
 
-	log.Printf("🔍 Успешно сгенерировано название: %s", titleResponse.Title)
+	log.Printf(LogTitleSuccess, titleResponse.Title)
 	return titleResponse.Title, nil
 }
 
-// callOpenAI отправляет запрос к OpenAI API
-func (c *OpenAIClient) callOpenAI(prompt string) (string, error) {
+// GatherContext собирает контекст пользователя для более точной генерации шагов
+func (c *OpenAIClient) GatherContext(goal *models.Goal) (*ContextResponse, error) {
+	// Загружаем промпт из файла
+	placeholders := c.promptUtils.BuildContextPromptPlaceholders(goal)
+	prompt, err := c.promptLoader.LoadPrompt(PromptContextGathering, placeholders)
+	if err != nil {
+		log.Printf(LogPromptLoadError, err)
+		return nil, fmt.Errorf("failed to load prompt: %w", err)
+	}
+
+	log.Printf(LogContextGathering, goal.Title)
+
+	response, err := c.callOpenAI(prompt, DefaultAPIConfig(), ContextResponseSchema)
+	if err != nil {
+		log.Printf(LogContextError, err)
+		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
+	}
+
+	log.Printf(LogContextResponse, response)
+
+	var contextResponse ContextResponse
+	if err := UnmarshalLLMResponseWithLogging(response, &contextResponse, "сбор контекста"); err != nil {
+		return nil, fmt.Errorf("failed to parse OpenAI response: %w", err)
+	}
+
+	log.Printf(LogContextSuccess, contextResponse.Status)
+	return &contextResponse, nil
+}
+
+// callOpenAI отправляет запрос к OpenAI API с поддержкой нового Responses API
+func (c *OpenAIClient) callOpenAI(prompt string, config APIConfig, responseSchema map[string]any) (string, error) {
 	// Проверяем, что API ключ установлен
 	if c.apiKey == "" {
-		log.Printf("❌ OpenAI API ключ не установлен")
+		log.Printf(LogAPIKeyMissing)
 		return "", fmt.Errorf("OpenAI API key is not set")
 	}
 
 	log.Printf("🔍 Отправляем запрос к OpenAI API...")
 
-	// Структура запроса к OpenAI
-	requestBody := map[string]any{
-		"model": c.model,
-		"messages": []map[string]string{
-			{
-				"role":    "system",
-				"content": "Ты помощник для достижения целей. Всегда отвечай в формате JSON.",
+	// Определяем, какой API использовать
+	var requestBody map[string]any
+
+	if config.BaseURL == ResponsesAPIEndpoint {
+		// Новый Responses API с JSON Schema
+		requestBody = map[string]any{
+			"model": config.Model,
+			"input": []map[string]string{
+				{
+					"role":    "system",
+					"content": SystemMessageResponses,
+				},
+				{
+					"role":    "user",
+					"content": prompt,
+				},
 			},
-			{
-				"role":    "user",
-				"content": prompt,
+			"text": map[string]any{
+				"format": map[string]any{
+					"type":   "json_schema",
+					"name":   "goal_assistant_response",
+					"schema": responseSchema,
+					"strict": true,
+				},
 			},
-		},
-		"temperature": 0.7,
-		"max_tokens":  500,
-		"response_format": map[string]string{
-			"type": "json_object",
-		},
+		}
+	} else {
+		// Старый Completions API
+		requestBody = map[string]any{
+			"model": config.Model,
+			"messages": []map[string]string{
+				{
+					"role":    "system",
+					"content": SystemMessageCompletions,
+				},
+				{
+					"role":    "user",
+					"content": prompt,
+				},
+			},
+			"temperature": DefaultTemperature,
+			"max_tokens":  DefaultMaxTokens,
+			"response_format": map[string]string{
+				"type": "json_object",
+			},
+		}
 	}
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
-		log.Printf("❌ Ошибка при маршалинге запроса: %v", err)
+		log.Printf(LogMarshalingError, err)
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL, bytes.NewBuffer(jsonData))
+	// Логируем запрос для диагностики
+	log.Printf(LogSendingRequestDetails)
+	log.Printf(LogRequestURL, config.BaseURL)
+	log.Printf(LogRequestModel, config.Model)
+	log.Printf(LogRequestBody, string(jsonData))
+
+	req, err := http.NewRequest("POST", config.BaseURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("❌ Ошибка при создании HTTP запроса: %v", err)
+		log.Printf(LogRequestError, err)
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	log.Printf("🔍 Отправляем HTTP запрос к %s", c.baseURL)
+	log.Printf(LogSendingHTTPRequest, config.BaseURL)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		log.Printf("❌ Ошибка при отправке HTTP запроса: %v", err)
+		log.Printf(LogHTTPRequestError, err)
 		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	log.Printf("🔍 Получен HTTP ответ: статус %d", resp.StatusCode)
+	log.Printf(LogHTTPResponse, resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		log.Printf("❌ OpenAI API вернул ошибку: %s - %s", resp.Status, string(body))
+		log.Printf(LogAPIError, resp.Status, string(body))
 		return "", fmt.Errorf("OpenAI API error: %s - %s", resp.Status, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("❌ Ошибка при чтении тела ответа: %v", err)
+		log.Printf(LogReadResponseError, err)
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 
-	log.Printf("🔍 Размер ответа: %d байт", len(body))
+	log.Printf(LogResponseSize, len(body))
+
+	// Логируем сырой ответ для диагностики
+	log.Printf(LogRawAPIResponse, string(body))
 
 	// Парсим ответ OpenAI
-	var openAIResponse struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-
-	if err := json.Unmarshal(body, &openAIResponse); err != nil {
-		log.Printf("❌ Ошибка при парсинге ответа OpenAI: %v", err)
-		log.Printf("🔍 Сырое тело ответа: %s", string(body))
-		return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
-	}
-
-	if len(openAIResponse.Choices) == 0 {
-		log.Printf("❌ OpenAI вернул пустой список choices")
-		return "", fmt.Errorf("no choices in OpenAI response")
-	}
-
-	content := openAIResponse.Choices[0].Message.Content
-	log.Printf("🔍 Успешно получен контент от OpenAI: %s", content)
-
-	return content, nil
-}
-
-// buildStepPrompt формирует промпт для генерации шага
-func (c *OpenAIClient) buildStepPrompt(goal *models.Goal, completedSteps []*models.Step) string {
-	var prompt strings.Builder
-
-	prompt.WriteString("Ты коуч, помогаешь пользователю достичь цели, разбивая её на минимальные, простые задачи.\n\n")
-	prompt.WriteString("Цель: " + goal.Title + "\n")
-	if goal.Description != "" {
-		prompt.WriteString("Описание: " + goal.Description + "\n")
-	}
-
-	if len(completedSteps) > 0 {
-		prompt.WriteString("Выполненные шаги:\n")
-		for i, step := range completedSteps {
-			prompt.WriteString(fmt.Sprintf("%d. %s\n", i+1, step.Text))
+	if config.BaseURL == ResponsesAPIEndpoint {
+		// Новый Responses API имеет другую структуру
+		var responsesAPIResponse struct {
+			ID     string `json:"id"`
+			Object string `json:"object"`
+			Status string `json:"status"`
+			Model  string `json:"model"`
+			Output []struct {
+				ID      string `json:"id"`
+				Type    string `json:"type"`
+				Status  string `json:"status"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+				Role string `json:"role"`
+			} `json:"output"`
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+				TotalTokens  int `json:"total_tokens"`
+			} `json:"usage"`
 		}
-		prompt.WriteString("\n")
+
+		if err := json.Unmarshal(body, &responsesAPIResponse); err != nil {
+			log.Printf(LogParseResponseError, err)
+			log.Printf(LogRawResponseBody, string(body))
+			return "", fmt.Errorf("failed to parse OpenAI Responses API response: %w", err)
+		}
+
+		// Логируем структуру ответа для диагностики
+		log.Printf(LogResponseStructure)
+		log.Printf(LogResponseID, responsesAPIResponse.ID)
+		log.Printf(LogResponseObject, responsesAPIResponse.Object)
+		log.Printf(LogResponseModel, responsesAPIResponse.Model)
+		log.Printf("  - Status: %s", responsesAPIResponse.Status)
+		log.Printf("  - Output count: %d", len(responsesAPIResponse.Output))
+		log.Printf(LogResponseUsage, responsesAPIResponse.Usage)
+
+		if len(responsesAPIResponse.Output) == 0 {
+			log.Printf("❌ OpenAI Responses API вернул пустой список output")
+			return "", fmt.Errorf("no output in OpenAI Responses API response")
+		}
+
+		// Извлекаем контент из первого output
+		output := responsesAPIResponse.Output[0]
+		if len(output.Content) == 0 {
+			log.Printf("❌ Пустой контент в output")
+			return "", fmt.Errorf("empty content in OpenAI Responses API output")
+		}
+
+		// Ищем текстовый контент
+		var content string
+		for _, contentItem := range output.Content {
+			if contentItem.Type == "output_text" {
+				content = contentItem.Text
+				break
+			}
+		}
+
+		if content == "" {
+			log.Printf("❌ Не найден текстовый контент в output")
+			return "", fmt.Errorf("no text content found in OpenAI Responses API output")
+		}
+
+		log.Printf(LogContentReceived, content)
+		return content, nil
+
+	} else {
+		// Старый Completions API
+		var openAIResponse struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			Model   string `json:"model"`
+			Usage   struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+
+		if err := json.Unmarshal(body, &openAIResponse); err != nil {
+			log.Printf(LogParseResponseError, err)
+			log.Printf(LogRawResponseBody, string(body))
+			return "", fmt.Errorf("failed to parse OpenAI response: %w", err)
+		}
+
+		// Логируем структуру ответа для диагностики
+		log.Printf(LogResponseStructure)
+		log.Printf(LogResponseID, openAIResponse.ID)
+		log.Printf(LogResponseObject, openAIResponse.Object)
+		log.Printf(LogResponseModel, openAIResponse.Model)
+		log.Printf(LogResponseCreated, openAIResponse.Created)
+		log.Printf(LogResponseUsage, openAIResponse.Usage)
+		log.Printf(LogResponseChoicesCount, len(openAIResponse.Choices))
+
+		if len(openAIResponse.Choices) == 0 {
+			log.Printf(LogNoChoices)
+			log.Printf(LogFullResponseStructure, openAIResponse)
+			return "", fmt.Errorf("no choices in OpenAI response")
+		}
+
+		content := openAIResponse.Choices[0].Message.Content
+		log.Printf(LogContentReceived, content)
+
+		// Для старого API извлекаем JSON из структуры ответа
+		content = ExtractJSONFromResponsesAPI(content)
+		return content, nil
 	}
-
-	// Добавляем логику завершения цели
-	prompt.WriteString("ВАЖНО: Проанализируй, достигнута ли уже цель на основе выполненных шагов.\n")
-	prompt.WriteString("Если цель достигнута - верни статус 'goal_completed' и объясни почему.\n")
-	prompt.WriteString("Если нужно еще 1-2 шага для завершения - верни статус 'near_completion'.\n")
-	prompt.WriteString("Если цель еще далеко - верни статус 'ok' и сгенерируй следующий шаг.\n\n")
-
-	prompt.WriteString("Сгенерируй следующий логичный шаг или определи завершение.\n\n")
-	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
-	prompt.WriteString(`{
-  "status": "ok" | "need_clarification" | "goal_completed" | "near_completion",
-  "step": "текст шага",
-  "question": "уточняющий вопрос (если нужен)",
-  "completion_reason": "причина завершения (если цель достигнута)"
-}`)
-
-	return prompt.String()
-}
-
-// buildRephrasePrompt формирует промпт для переформулировки шага
-func (c *OpenAIClient) buildRephrasePrompt(goal *models.Goal, currentStep *models.Step, userComment string) string {
-	var prompt strings.Builder
-
-	prompt.WriteString("Цель: " + goal.Title + "\n")
-	prompt.WriteString("Текущий шаг: " + currentStep.Text + "\n")
-	prompt.WriteString("Комментарий пользователя: " + userComment + "\n\n")
-	prompt.WriteString("Сформулируй альтернативный шаг на том же уровне сложности.\n\n")
-	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
-	prompt.WriteString(`{
-  "status": "ok",
-  "step": "новый текст шага"
-}`)
-
-	return prompt.String()
-}
-
-// buildClarificationPrompt формирует промпт для уточнения цели
-func (c *OpenAIClient) buildClarificationPrompt(goalTitle, goalDescription string) string {
-	var prompt strings.Builder
-
-	prompt.WriteString("Цель: " + goalTitle + "\n")
-	if goalDescription != "" {
-		prompt.WriteString("Описание: " + goalDescription + "\n")
-	}
-	prompt.WriteString("\nЕсли цель недостаточно понятна для генерации шага — верни статус и вопрос:\n\n")
-	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
-	prompt.WriteString(`{
-  "status": "need_clarification",
-  "question": "уточняющий вопрос"
-}`)
-
-	return prompt.String()
-}
-
-// buildTitlePrompt формирует промпт для генерации названия цели
-func (c *OpenAIClient) buildTitlePrompt(description string) string {
-	var prompt strings.Builder
-
-	prompt.WriteString("Сгенерируй краткое и точное название для цели на основе описания.\n\n")
-	prompt.WriteString("Описание: " + description + "\n\n")
-	prompt.WriteString("Название должно быть:\n")
-	prompt.WriteString("- Кратким (3-7 слов)\n")
-	prompt.WriteString("- Конкретным и понятным\n")
-	prompt.WriteString("- Мотивирующим\n")
-	prompt.WriteString("- Без кавычек\n\n")
-	prompt.WriteString("ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n")
-	prompt.WriteString(`{
-  "title": "краткое название цели"
-}`)
-
-	return prompt.String()
 }

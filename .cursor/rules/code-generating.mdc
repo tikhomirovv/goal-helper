@@ -1,0 +1,8 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+1. Не пиши тесты никогда.
+
+2. Вместо `interface{}` испльзуй более современный `any`
